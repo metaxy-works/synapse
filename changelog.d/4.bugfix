@@ -1,0 +1,1 @@
+Return a clear error when Sliding Sync is requested with an access token that is not associated with a device, instead of an internal server error.
