@@ -6,7 +6,7 @@ on:
       - schema/**
       - docs/usage/configuration/config_documentation.md
   push:
-    branches: ["develop", "release-*"]
+    branches: ["main", "develop", "release-*"]
   workflow_dispatch:
 
 jobs:

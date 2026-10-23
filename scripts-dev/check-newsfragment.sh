@@ -7,9 +7,10 @@ echo -e "+++ \033[32mChecking newsfragment\033[m"
 
 set -e
 
-# make sure that origin/develop is up to date
-git remote set-branches --add origin develop
-git fetch -q origin develop
+# make sure that the PR base branch is up to date (develop outside CI)
+base_branch="${GITHUB_BASE_REF:-develop}"
+git remote set-branches --add origin "$base_branch"
+git fetch -q origin "$base_branch"
 
 pr="$PULL_REQUEST_NUMBER"
 
@@ -35,7 +36,7 @@ CONTRIBUTING_GUIDE_TEXT="!! Please see the contributing guide for help writing y
 https://element-hq.github.io/synapse/latest/development/contributing_guide.html#changelog"
 
 # If check-newsfragment returns a non-zero exit code, print the contributing guide and exit
-python -m towncrier.check --compare-with=origin/develop || (echo -e "$CONTRIBUTING_GUIDE_TEXT" >&2 && exit 1)
+python -m towncrier.check --compare-with="origin/$base_branch" || (echo -e "$CONTRIBUTING_GUIDE_TEXT" >&2 && exit 1)
 
 echo
 echo "--------------------------"
