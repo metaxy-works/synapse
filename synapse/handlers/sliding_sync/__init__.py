@@ -47,6 +47,8 @@ from synapse.storage.roommember import (
     MemberSummary,
 )
 from synapse.types import (
+    Absent,
+    AbsentType,
     JsonDict,
     MutableStateMap,
     PersistedEventPosition,
@@ -1357,13 +1359,18 @@ class SlidingSyncHandler:
         if required_state_filter != StateFilter.none():
             required_room_state = required_state_filter.filter_state(room_state)
 
-        room_avatar: str | None = None
-        avatar_event = room_state.get((EventTypes.RoomAvatar, ""))
-        if avatar_event is not None:
-            room_avatar_content: StrictJsonMapping = avatar_event.content
-            unchecked_room_avatar = room_avatar_content.get("url")
-            if isinstance(unchecked_room_avatar, str):
-                room_avatar = unchecked_room_avatar
+        room_avatar: str | None | AbsentType = Absent
+        if initial or avatar_changed:
+            # Omit unset avatars on initial sync, but explicitly clear a previous
+            # avatar on incremental sync, even when no timeline/state is requested.
+            if not initial:
+                room_avatar = None
+            avatar_event = room_state.get((EventTypes.RoomAvatar, ""))
+            if avatar_event is not None:
+                room_avatar_content: StrictJsonMapping = avatar_event.content
+                unchecked_room_avatar = room_avatar_content.get("url")
+                if isinstance(unchecked_room_avatar, str) and unchecked_room_avatar:
+                    room_avatar = unchecked_room_avatar
 
         # Assemble heroes: extract the info from the state we just fetched
         heroes: list[SlidingSyncResult.RoomResult.StrippedHero] = []

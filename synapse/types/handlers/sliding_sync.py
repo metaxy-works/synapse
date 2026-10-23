@@ -36,6 +36,8 @@ from synapse.api.constants import EventTypes
 from synapse.events import EventBase
 from synapse.events.utils import FilteredEvent
 from synapse.types import (
+    Absent,
+    AbsentType,
     DeviceListUpdates,
     JsonDict,
     JsonMapping,
@@ -120,7 +122,7 @@ class SlidingSyncResult:
         """
         Attributes:
             name: Room name or calculated room name.
-            avatar: Room avatar
+            avatar: Room avatar URL, None if cleared, or Absent if unchanged/unset.
             heroes: List of stripped membership events (containing `user_id` and optionally
                 `avatar_url` and `displayname`) for the users used to calculate the room name.
             is_dm: Flag to specify whether the room is a direct-message room (most likely
@@ -178,7 +180,7 @@ class SlidingSyncResult:
             avatar_url: str | None
 
         name: str | None
-        avatar: str | None
+        avatar: str | None | AbsentType
         heroes: list[StrippedHero] | None
         is_dm: bool
         initial: bool
@@ -212,7 +214,7 @@ class SlidingSyncResult:
                 self.initial
                 # We need to let the client know if any of the info has changed
                 or self.name is not None
-                or self.avatar is not None
+                or self.avatar is not Absent
                 or bool(self.heroes)
                 or self.joined_count is not None
                 or self.invited_count is not None

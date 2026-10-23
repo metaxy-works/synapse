@@ -57,6 +57,7 @@ from synapse.http.site import SynapseRequest
 from synapse.logging.opentracing import log_kv, set_tag, trace_with_opname
 from synapse.rest.admin.experimental_features import ExperimentalFeature
 from synapse.types import (
+    Absent,
     JsonDict,
     JsonMapping,
     Requester,
@@ -981,7 +982,7 @@ class SlidingSyncRestServlet(RestServlet):
             if room_result.name:
                 serialized_rooms[room_id]["name"] = room_result.name
 
-            if room_result.avatar:
+            if room_result.avatar is not Absent:
                 serialized_rooms[room_id]["avatar"] = room_result.avatar
 
             if room_result.heroes is not None and len(room_result.heroes) > 0:

@@ -24,6 +24,7 @@ from synapse.api.constants import EventContentFields, EventTypes, Membership
 from synapse.api.room_versions import RoomVersions
 from synapse.rest.client import login, room, sync
 from synapse.server import HomeServer
+from synapse.types import JsonDict
 from synapse.util.clock import Clock
 
 from tests.rest.client.sliding_sync.test_sliding_sync import SlidingSyncBase
@@ -72,6 +73,49 @@ class SlidingSyncRoomsMetaTestCase(SlidingSyncBase):
         self.persistence = persistence
 
         super().prepare(reactor, clock, hs)
+
+    @parameterized.expand([({},), ({"url": None},), ({"url": ""},), ({"url": 42},)])
+    def test_rooms_meta_avatar_removed(self, content: JsonDict) -> None:
+        """An avatar-only removal must be sent once, even without a timeline."""
+        user_id = self.register_user("user", "pass")
+        token = self.login(user_id, "pass")
+        room_id = self.helper.create_room_as(user_id, tok=token)
+        self.helper.send_state(
+            room_id, EventTypes.RoomAvatar, {"url": "mxc://test/old"}, tok=token
+        )
+        body = {
+            "lists": {
+                "all": {"ranges": [[0, 10]], "required_state": [], "timeline_limit": 0}
+            }
+        }
+        response, pos = self.do_sync(body, tok=token)
+        self.assertEqual(response["rooms"][room_id]["avatar"], "mxc://test/old")
+
+        # Federated events can contain values rejected by client event validation.
+        with patch("synapse.events.validator.EventValidator.validate_new"):
+            self.get_success(
+                inject_event(
+                    self.hs,
+                    room_id=room_id,
+                    sender=user_id,
+                    type=EventTypes.RoomAvatar,
+                    state_key="",
+                    content=content,
+                )
+            )
+        response, pos = self.do_sync(body, tok=token, since=pos)
+        self.assertIn(room_id, response["rooms"])
+        self.assertIn("avatar", response["rooms"][room_id])
+        self.assertIsNone(response["rooms"][room_id]["avatar"])
+
+        response, pos = self.do_sync(body, tok=token, since=pos)
+        self.assertNotIn("avatar", response["rooms"].get(room_id, {}))
+
+        self.helper.send_state(
+            room_id, EventTypes.RoomAvatar, {"url": "mxc://test/new"}, tok=token
+        )
+        response, _ = self.do_sync(body, tok=token, since=pos)
+        self.assertEqual(response["rooms"][room_id]["avatar"], "mxc://test/new")
 
     def test_rooms_meta_when_joined_initial(self) -> None:
         """
