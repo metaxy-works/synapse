@@ -26,7 +26,7 @@ import os
 import re
 import shutil
 from typing import Any, BinaryIO, ClassVar, Sequence
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from urllib import parse
 from urllib.parse import quote, urlencode
 
@@ -2665,7 +2665,8 @@ class AuthenticatedMediaTestCase(unittest.HomeserverTestCase):
         uri = channel.json_body["content_uri"].split("mxc://")[1]
 
         with patch(
-            "synapse.media._base.ThreadedFileSender.beginFileTransfer"
+            "synapse.media._base.ThreadedFileSender.beginFileTransfer",
+            new_callable=AsyncMock,
         ) as begin_file_transfer:
             channel = self.make_request(
                 "HEAD",

@@ -18,11 +18,105 @@
 #
 #
 
-from unittest.mock import Mock
+import io
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
-from synapse.media._base import add_file_headers, get_filename_from_headers
+from parameterized import parameterized
+
+from synapse.media._base import (
+    Responder,
+    add_file_headers,
+    get_filename_from_headers,
+    respond_with_file,
+    respond_with_multipart_responder,
+    respond_with_responder,
+)
+from synapse.media.media_storage import FileResponder
 
 from tests import unittest
+
+
+class MediaHeadResponseTests(unittest.HomeserverTestCase):
+    @parameterized.expand([(b"data", None), (b"", None), (b"data", 4), (b"", 0)])
+    def test_file_head(self, body: bytes, file_size: int | None) -> None:
+        path = self.mktemp()
+        Path(path).write_bytes(body)
+        request = Mock(method=b"HEAD")
+        with patch("synapse.media._base.open") as open_file:
+            self.get_success(
+                respond_with_file(self.hs, request, "text/plain", path, file_size)
+            )
+        open_file.assert_not_called()
+        request.setHeader.assert_any_call(b"Content-Length", str(len(body)).encode())
+        request.finish.assert_called_once()
+        request.write.assert_not_called()
+
+    def test_file_head_missing(self) -> None:
+        request = Mock(
+            method=b"HEAD", path=b"/missing", _disconnected=False, reactor=self.reactor
+        )
+        self.get_success(
+            respond_with_file(self.hs, request, "text/plain", self.mktemp())
+        )
+        self.pump()
+        request.setResponseCode.assert_called_once_with(404)
+        request.finish.assert_called_once()
+
+    @parameterized.expand(
+        [
+            (multipart, method, size)
+            for multipart in (False, True)
+            for method in (b"HEAD", b"GET")
+            for size in (None, 4)
+        ]
+    )
+    def test_provider_lifecycle(
+        self, multipart: bool, method: bytes, size: int | None
+    ) -> None:
+        request = Mock(method=method, _disconnected=False)
+        responder = MagicMock(spec=Responder)
+        responder.write_to_consumer = AsyncMock()
+        if multipart:
+            self.get_success(
+                respond_with_multipart_responder(
+                    self.hs.get_clock(), request, responder, "text/plain", size, None
+                )
+            )
+        else:
+            self.get_success(
+                respond_with_responder(request, responder, "text/plain", size)
+            )
+        responder.__enter__.assert_called_once()
+        responder.__exit__.assert_called_once_with(None, None, None)
+        if method == b"HEAD":
+            responder.write_to_consumer.assert_not_called()
+            request.write.assert_not_called()
+        else:
+            responder.write_to_consumer.assert_awaited_once()
+        if size is None:
+            self.assertNotIn(
+                b"Content-Length",
+                [call.args[0] for call in request.setHeader.call_args_list],
+            )
+        request.finish.assert_called_once()
+
+    @parameterized.expand([(False,), (True,)])
+    def test_head_closes_file(self, multipart: bool) -> None:
+        request = Mock(method=b"HEAD", _disconnected=False)
+        stream = io.BytesIO(b"data")
+        responder = FileResponder(self.hs, stream)
+        if multipart:
+            self.get_success(
+                respond_with_multipart_responder(
+                    self.hs.get_clock(), request, responder, "text/plain", 4, None
+                )
+            )
+        else:
+            self.get_success(
+                respond_with_responder(request, responder, "text/plain", 4)
+            )
+        self.assertTrue(stream.closed)
 
 
 class GetFileNameFromHeadersTests(unittest.TestCase):

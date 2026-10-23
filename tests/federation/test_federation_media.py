@@ -21,7 +21,7 @@ import io
 import os
 import shutil
 import tempfile
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from twisted.internet.testing import MemoryReactor
 
@@ -161,7 +161,8 @@ class FederationMediaDownloadsTest(unittest.FederatingHomeserverTestCase):
         )
 
         with patch(
-            "synapse.media._base.ThreadedFileSender.beginFileTransfer"
+            "synapse.media._base.ThreadedFileSender.beginFileTransfer",
+            new_callable=AsyncMock,
         ) as begin_file_transfer:
             channel = self.make_signed_federation_request(
                 "HEAD",
@@ -176,6 +177,19 @@ class FederationMediaDownloadsTest(unittest.FederatingHomeserverTestCase):
         self.assertEqual(channel.is_finished(), True)
         self.assertEqual(channel.result.get("body", b""), b"")
         begin_file_transfer.assert_not_called()
+
+        get_channel = self.make_signed_federation_request(
+            "GET", f"/_matrix/federation/v1/media/download/{content_uri.media_id}"
+        )
+        self.pump()
+        self.assertEqual(get_channel.code, 200)
+        expected_length = [str(len(get_channel.result["body"])).encode()]
+        self.assertEqual(
+            get_channel.headers.getRawHeaders(b"Content-Length"), expected_length
+        )
+        self.assertEqual(
+            channel.headers.getRawHeaders(b"Content-Length"), expected_length
+        )
 
     def test_federation_etag(self) -> None:
         """Test that federation ETags work"""
