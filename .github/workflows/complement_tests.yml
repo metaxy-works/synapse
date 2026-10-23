@@ -4,6 +4,10 @@ name: Reusable Complement testing
 on:
   workflow_call:
     inputs:
+      run_external_tests:
+        description: Run external Complement as well as the in-repo suite.
+        type: boolean
+        default: true
       use_latest_deps:
         type: boolean
         default: false
@@ -54,6 +58,8 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: synapse -> target
 
       # We use `poetry` in `complement.sh`
       - uses: matrix-org/setup-python-poetry@5bbf6603c5c930615ec8a29f1b5d7d258d905aa4 # v2.0.0
@@ -67,7 +73,9 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          cache-dependency-path: complement/go.sum
+          cache-dependency-path: |
+            complement/go.sum
+            synapse/complement/go.sum
           go-version-file: complement/go.mod
 
       # This step is specific to the 'Twisted trunk' test run:
@@ -128,6 +136,7 @@ jobs:
 
       - name: Run Complement Tests
         id: run_complement_tests
+        if: ${{ inputs.run_external_tests }}
         # -p=1: We're using `-p 1` to force the test packages to run serially as GHA boxes
         #     are underpowered and don't like running tons of Synapse instances at once.
         # -json: Output JSON format so that gotestfmt can parse it.
@@ -139,13 +148,18 @@ jobs:
         # filter.
         run: |
           set -o pipefail
-          COMPLEMENT_DIR=`pwd`/complement synapse/scripts-dev/complement.sh -p 1 -json 2>&1 \
+          extra_args=()
+          if [[ "$REUSE_IMAGE" == "true" ]]; then extra_args+=(--fast); fi
+          COMPLEMENT_DIR=`pwd`/complement synapse/scripts-dev/complement.sh "${extra_args[@]}" -p 1 -json 2>&1 \
             | tee /tmp/gotest-complement.log \
             | jq -rR --unbuffered '. as $raw | (try fromjson catch $raw) | if type == "object" then (select(.Action=="pass" or .Action=="fail" or .Action=="skip") | select(.Test) | "\(.Action|ascii_upcase) \(.Test) \(.Elapsed)s") else $raw end'
         shell: bash
         env:
           POSTGRES: ${{ (matrix.database == 'Postgres') && 1 || '' }}
           WORKERS: ${{ (matrix.arrangement == 'workers') && 1 || '' }}
+          # The sanity build uses locked dependencies, so special dependency
+          # modes must retain their original rebuild behavior.
+          REUSE_IMAGE: ${{ !inputs.use_latest_deps && !inputs.use_twisted_trunk && 'true' || 'false' }}
           TEST_ONLY_IGNORE_POETRY_LOCKFILE: ${{ inputs.use_latest_deps && 1 || '' }}
           TEST_ONLY_SKIP_DEP_HASH_VERIFICATION: ${{ inputs.use_twisted_trunk  && 1 || '' }}
 
@@ -160,10 +174,9 @@ jobs:
         run: cat /tmp/gotest-complement.log | gotestfmt -hide "successful-downloads,successful-tests,empty-packages"
 
       - name: Run in-repo Complement Tests
-        # Always run as long as we attempted to run the original Complement tests.
-        # This lets us get a status report on the in-repo tests, even if the
-        # standard Complement test suite fails.
-        if: always() && steps.run_complement_tests.outcome != 'skipped'
+        # Run even if the external suite fails, or was intentionally omitted.
+        # A failed image sanity check must never allow reuse of that image.
+        if: ${{ !cancelled() && steps.run_sanity_check_complement_image_test.outcome == 'success' && (!inputs.run_external_tests || steps.run_complement_tests.outcome != 'skipped') }}
         id: run_in_repo_complement_tests
         # -p=1: We're using `-p 1` to force the test packages to run serially as GHA boxes
         #     are underpowered and don't like running tons of Synapse instances at once.
@@ -176,13 +189,18 @@ jobs:
         # the jq filter.
         run: |
           set -o pipefail
-          COMPLEMENT_DIR=`pwd`/complement synapse/scripts-dev/complement.sh --in-repo -p 1 -json 2>&1 \
+          extra_args=()
+          if [[ "$REUSE_IMAGE" == "true" ]]; then extra_args+=(--fast); fi
+          COMPLEMENT_DIR=`pwd`/complement synapse/scripts-dev/complement.sh --in-repo "${extra_args[@]}" -p 1 -json 2>&1 \
             | tee /tmp/gotest-in-repo-complement.log \
             | jq -rR --unbuffered '. as $raw | (try fromjson catch $raw) | if type == "object" then (select(.Action=="pass" or .Action=="fail" or .Action=="skip") | select(.Test) | "\(.Action|ascii_upcase) \(.Test) \(.Elapsed)s") else $raw end'
         shell: bash
         env:
           POSTGRES: ${{ (matrix.database == 'Postgres') && 1 || '' }}
           WORKERS: ${{ (matrix.arrangement == 'workers') && 1 || '' }}
+          # The sanity build uses locked dependencies, so special dependency
+          # modes must retain their original rebuild behavior.
+          REUSE_IMAGE: ${{ !inputs.use_latest_deps && !inputs.use_twisted_trunk && 'true' || 'false' }}
           TEST_ONLY_IGNORE_POETRY_LOCKFILE: ${{ inputs.use_latest_deps && 1 || '' }}
           TEST_ONLY_SKIP_DEP_HASH_VERIFICATION: ${{ inputs.use_twisted_trunk  && 1 || '' }}
 
