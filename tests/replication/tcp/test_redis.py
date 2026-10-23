@@ -4,18 +4,30 @@
 from unittest.mock import Mock
 
 from parameterized import parameterized
-from txredisapi import RedisFactory, RedisProtocol, ResponseError
 
 from twisted.internet.defer import CancelledError, ensureDeferred
 from twisted.internet.testing import StringTransport
 
 from synapse.logging.context import SENTINEL_CONTEXT, LoggingContext, current_context
-from synapse.replication.tcp.redis import RedisSubscriber
 
 from tests.unittest import TestCase
 
+try:
+    from txredisapi import RedisFactory, RedisProtocol, ResponseError
+except ModuleNotFoundError as exc:
+    if exc.name != "txredisapi":
+        raise
+    HAS_REDIS = False
+else:
+    from synapse.replication.tcp.redis import RedisSubscriber
+
+    HAS_REDIS = True
+
 
 class RedisSubscriptionTestCase(TestCase):
+    if not HAS_REDIS:
+        skip = "Requires txredisapi"
+
     @parameterized.expand(
         [
             (ready, outcome)
