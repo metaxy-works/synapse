@@ -1,0 +1,1 @@
+Fix Sliding Sync not notifying clients when a room avatar is removed.
