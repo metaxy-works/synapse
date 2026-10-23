@@ -1,0 +1,1 @@
+Avoid reading media response bodies when answering HEAD requests.

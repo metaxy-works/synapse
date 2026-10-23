@@ -26,7 +26,7 @@ import os
 import re
 import shutil
 from typing import Any, BinaryIO, ClassVar, Sequence
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from urllib import parse
 from urllib.parse import quote, urlencode
 
@@ -2651,6 +2651,38 @@ class AuthenticatedMediaTestCase(unittest.HomeserverTestCase):
         resources = super().create_resource_dict()
         resources["/_matrix/media"] = self.hs.get_media_repository_resource()
         return resources
+
+    def test_head_download_does_not_read_file(self) -> None:
+        channel = self.make_request(
+            "POST",
+            "_matrix/media/v3/upload?filename=test_png_upload",
+            SMALL_PNG,
+            self.tok,
+            shorthand=False,
+            content_type=b"image/png",
+        )
+        self.assertEqual(channel.code, 200)
+        uri = channel.json_body["content_uri"].split("mxc://")[1]
+
+        with patch(
+            "synapse.media._base.ThreadedFileSender.beginFileTransfer",
+            new_callable=AsyncMock,
+        ) as begin_file_transfer:
+            channel = self.make_request(
+                "HEAD",
+                f"_matrix/client/v1/media/download/{uri}",
+                access_token=self.tok,
+                shorthand=False,
+            )
+
+        self.assertEqual(channel.code, 200)
+        self.assertEqual(
+            channel.headers.getRawHeaders(b"Content-Length"),
+            [str(len(SMALL_PNG)).encode()],
+        )
+        self.assertEqual(channel.headers.getRawHeaders(b"Content-Type"), [b"image/png"])
+        self.assertEqual(channel.result.get("body", b""), b"")
+        begin_file_transfer.assert_not_called()
 
     def test_authenticated_media(self) -> None:
         # upload some local media with authentication on
