@@ -3524,19 +3524,26 @@ class SyncHandler:
             account_data_events = []
             if tags is not None:
                 account_data_events.append(
-                    {"type": AccountDataTypes.TAG, "content": {"tags": tags}}
+                    {
+                        "type": AccountDataTypes.TAG,
+                        "content": {"tags": tags},
+                        "room_id": room_id,
+                    }
                 )
 
             for account_data_type, content in account_data.items():
                 account_data_events.append(
-                    {"type": account_data_type, "content": content}
+                    {"type": account_data_type, "content": content, "room_id": room_id}
                 )
 
-            account_data_events = (
-                await sync_config.filter_collection.filter_room_account_data(
+            account_data_events = [
+                # Room filters need the ID, but per-room account data must not
+                # include it in the sync response.
+                {k: v for k, v in event.items() if k != "room_id"}
+                for event in await sync_config.filter_collection.filter_room_account_data(
                     account_data_events
                 )
-            )
+            ]
 
             ephemeral = [
                 # per spec, ephemeral events (typing notifications and read receipts)

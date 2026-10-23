@@ -20,6 +20,7 @@
 #
 import json
 import logging
+from urllib.parse import urlencode
 
 from parameterized import parameterized
 
@@ -78,6 +79,90 @@ class SyncFilterTestCase(unittest.HomeserverTestCase):
         login.register_servlets,
         sync.register_servlets,
     ]
+
+    @parameterized.expand(
+        [
+            ("room_whitelist", False, False, False, False),
+            ("room_blacklist", False, True, False, False),
+            ("account_data_whitelist", True, False, False, False),
+            ("account_data_blacklist", True, True, False, False),
+            ("types", False, False, True, False),
+            ("empty_rooms", False, False, False, True),
+        ]
+    )
+    def test_sync_filter_room_account_data(
+        self,
+        name: str,
+        nested: bool,
+        blacklist: bool,
+        filter_types: bool,
+        empty_rooms: bool,
+    ) -> None:
+        """Room filters apply to account data before room_id is stripped."""
+        user_id = self.register_user("user", "pass")
+        token = self.login(user_id, "pass")
+        rooms = [self.helper.create_room_as(user_id, tok=token) for _ in range(2)]
+        account_data_handler = self.hs.get_account_data_handler()
+        room_filter: JsonDict = {"account_data": {}}
+        target_filter = room_filter["account_data"] if nested else room_filter
+        target_filter["rooms"] = (
+            [] if empty_rooms else rooms if blacklist else rooms[:1]
+        )
+        if blacklist:
+            target_filter["not_rooms"] = rooms[1:]
+        if filter_types:
+            room_filter["account_data"].update(
+                {
+                    "types": ["m.tag", "com.example.setting"],
+                    "not_types": ["com.example.setting"],
+                }
+            )
+
+        since = None
+        for value in (1, 2):
+            for room_id in rooms:
+                self.get_success(
+                    account_data_handler.add_account_data_to_room(
+                        user_id,
+                        room_id,
+                        "com.example.setting",
+                        {"value": value, "room_id": "content-value"},
+                    )
+                )
+                self.get_success(
+                    account_data_handler.add_tag_to_room(
+                        user_id, room_id, "m.favourite", {"order": value}
+                    )
+                )
+            params = {"filter": json.dumps({"room": room_filter})}
+            if since is not None:
+                params["since"] = since
+            channel = self.make_request(
+                "GET", "/sync?" + urlencode(params), access_token=token
+            )
+            self.assertEqual(channel.code, 200, channel.json_body)
+            since = channel.json_body["next_batch"]
+            joined = channel.json_body.get("rooms", {}).get("join", {})
+            for room_id in rooms:
+                events = (
+                    joined.get(room_id, {}).get("account_data", {}).get("events", [])
+                )
+                if empty_rooms or room_id == rooms[1]:
+                    self.assertEqual(events, [])
+                    continue
+                expected: dict[str, JsonDict] = {
+                    "m.tag": {"tags": {"m.favourite": {"order": value}}}
+                }
+                if not filter_types:
+                    expected["com.example.setting"] = {
+                        "value": value,
+                        "room_id": "content-value",
+                    }
+                self.assertEqual(
+                    {event["type"]: event["content"] for event in events}, expected
+                )
+                for event in events:
+                    self.assertNotIn("room_id", event)
 
     def test_sync_filter_labels(self) -> None:
         """Test that we can filter by a label."""
