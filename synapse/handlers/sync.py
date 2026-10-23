@@ -2981,6 +2981,26 @@ class SyncHandler:
         newly_joined_rooms = room_changes.newly_joined_rooms
         newly_left_rooms = room_changes.newly_left_rooms
 
+        if since_token and newly_joined_rooms and not block_all_room_ephemeral:
+            # A room may first be included after completing a partial-state
+            # join. Earlier syncs can have advanced the receipt token without
+            # returning that room, so its first appearance needs a snapshot.
+            receipts, _ = await self.event_sources.sources.receipt.get_new_events(
+                user=sync_config.user,
+                from_key=MultiWriterStreamToken(stream=0),
+                to_key=sync_result_builder.now_token.receipt_key,
+                limit=sync_config.filter_collection.ephemeral_limit(),
+                room_ids=newly_joined_rooms,
+                is_guest=sync_config.is_guest,
+            )
+            for event in receipts:
+                room_id = event["room_id"]
+                ephemeral_by_room[room_id] = [
+                    existing
+                    for existing in ephemeral_by_room.get(room_id, [])
+                    if existing["type"] != "m.receipt"
+                ] + [dict(event)]
+
         if self.hs_config.experimental.msc4354_enabled and newly_joined_rooms:
             # If we have any newly-joined rooms, load all sticky events from them.
             # We then send down all the sticky events, including historical ones,
@@ -3365,16 +3385,25 @@ class SyncHandler:
                 leave_token = now_token.copy_and_replace(
                     StreamKeyType.ROOM, RoomStreamToken(stream=event.event_pos.stream)
                 )
+                leave_event = await self.store.get_event(event.event_id)
+                out_of_band = leave_event.internal_metadata.is_out_of_band_membership()
                 room_entries.append(
                     RoomSyncResultBuilder(
                         room_id=event.room_id,
                         rtype="archived",
-                        events=None,
+                        # OOB leaves are outliers, so timeline pagination will
+                        # not find them. Include the membership explicitly, as
+                        # we do for incremental syncs.
+                        events=[leave_event]
+                        if out_of_band
+                        and sync_config.filter_collection.timeline_limit() > 0
+                        else None,
                         newly_joined=False,
                         full_state=True,
                         since_token=since_token,
                         upto_token=leave_token,
                         end_token=leave_token,
+                        out_of_band=out_of_band,
                     )
                 )
 

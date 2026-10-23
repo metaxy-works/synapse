@@ -216,8 +216,9 @@ async def filter_and_transform_events_for_client(
         # Annotate the event with the user's membership after the event.
         #
         # Normally we just look in `state_after_event`, but if the event is an outlier
-        # we won't have such a state. The only outliers that are returned here are the
-        # user's own membership event, so we can just inspect that.
+        # we won't have such a state. For the user's own membership event we
+        # can inspect the event itself. Explicitly included current-state events
+        # may also be outliers on a worker, without a known membership annotation.
 
         user_membership_event: EventBase | None
         if event.type == EventTypes.Member and event.state_key == user_id:
@@ -225,8 +226,7 @@ async def filter_and_transform_events_for_client(
         elif state_after_event is not None:
             user_membership_event = state_after_event.get((EventTypes.Member, user_id))
         else:
-            # unreachable!
-            raise Exception("Missing state for event that is not user's own membership")
+            return FilteredEvent(event=filtered, membership=None)
 
         user_membership = (
             user_membership_event.membership

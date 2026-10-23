@@ -667,6 +667,29 @@ class FilterEventsOutOfBandEventsForClientTestCase(
             [],
         )
 
+        # Current state may explicitly include another user's out-of-band
+        # membership event while this worker still treats it as an outlier.
+        for included in ([invite_event], [reject_event], [invite_event, reject_event]):
+            with self.subTest(included=[event.event_id for event in included]):
+                filtered_events = self.get_success(
+                    filter_and_transform_events_for_client(
+                        self.hs.get_storage_controllers(),
+                        "@other:test",
+                        [invite_event, reject_event],
+                        always_include_ids=frozenset(
+                            event.event_id for event in included
+                        ),
+                    )
+                )
+                self.assertEqual(
+                    [event.event.event_id for event in filtered_events],
+                    [event.event_id for event in included],
+                )
+                self.assertEqual(
+                    [event.membership for event in filtered_events],
+                    [None] * len(included),
+                )
+
 
 async def inject_visibility_event(
     hs: HomeServer,

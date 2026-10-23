@@ -19,12 +19,13 @@
 #
 #
 
+import json
 import logging
 import time
 import urllib.parse
 from http import HTTPStatus
 from typing import Any, Callable, TypeVar
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import attr
 from parameterized import parameterized
@@ -32,8 +33,8 @@ from parameterized import parameterized
 from twisted.internet.testing import MemoryReactor
 
 from synapse.api.constants import EventContentFields, EventTypes, Membership
-from synapse.api.room_versions import RoomVersion
-from synapse.events import EventBase
+from synapse.api.room_versions import RoomVersion, RoomVersions
+from synapse.events import EventBase, make_event_from_dict
 from synapse.events.utils import strip_event
 from synapse.federation.transport.client import SendJoinResponse
 from synapse.http.matrixfederationclient import (
@@ -43,7 +44,7 @@ from synapse.http.types import QueryParams
 from synapse.rest import admin
 from synapse.rest.client import login, room, sync
 from synapse.server import HomeServer
-from synapse.types import JsonDict, MutableStateMap, StateMap
+from synapse.types import JsonDict, MutableStateMap, StateMap, create_requester
 from synapse.types.handlers.sliding_sync import (
     StateValues,
 )
@@ -140,6 +141,142 @@ class OutOfBandMembershipTests(unittest.FederatingHomeserverTestCase):
 
         self.store = self.hs.get_datastores().main
         self.storage_controllers = hs.get_storage_controllers()
+
+    @parameterized.expand([(True, False), (True, True), (False, False), (False, True)])
+    def test_initial_sync_out_of_band_leave(
+        self, rescinded: bool, include_leave: bool
+    ) -> None:
+        """The initial sync must not consume and omit a state-less OOB leave."""
+        user_id = self.register_user("invitee", "password")
+        token = self.login(user_id, "password")
+        room_id = "!remote-room:remote"
+        inviter = "@inviter:" + self.OTHER_SERVER_NAME
+        invite_json = self.add_hashes_and_signatures_from_other_server(
+            {
+                "room_id": room_id,
+                "depth": 1,
+                "auth_events": [],
+                "prev_events": [],
+                "origin_server_ts": 1,
+                "sender": inviter,
+                "type": EventTypes.Member,
+                "state_key": user_id,
+                "content": {"membership": Membership.INVITE},
+            }
+        )
+        invite = make_event_from_dict(invite_json, RoomVersions.V9)
+        self.get_success(
+            self.hs.get_federation_server().on_invite_request(
+                origin=self.OTHER_SERVER_NAME,
+                expected_event_id=invite.event_id,
+                expected_room_id=room_id,
+                event_json=invite_json,
+                room_version_id="9",
+            )
+        )
+        if rescinded:
+            leave_json = self.add_hashes_and_signatures_from_other_server(
+                {
+                    "room_id": room_id,
+                    "depth": 2,
+                    "auth_events": [invite.event_id],
+                    "prev_events": [invite.event_id],
+                    "origin_server_ts": 2,
+                    "sender": inviter,
+                    "type": EventTypes.Member,
+                    "state_key": user_id,
+                    "content": {"membership": Membership.LEAVE},
+                }
+            )
+            leave = make_event_from_dict(leave_json, RoomVersions.V9)
+            self.get_success(
+                self.hs.get_federation_event_handler().on_receive_pdu(
+                    self.OTHER_SERVER_NAME, leave
+                )
+            )
+        else:
+            with patch.object(
+                self.hs.get_federation_handler(),
+                "do_remotely_reject_invite",
+                side_effect=Exception("Remote rejection unavailable"),
+            ):
+                leave_id, _ = self.get_success(
+                    self.hs.get_room_member_handler().remote_reject_invite(
+                        invite.event_id,
+                        txn_id=None,
+                        requester=create_requester(user_id),
+                        content={},
+                    )
+                )
+            leave = self.get_success(self.store.get_event(leave_id))
+
+        self.assertTrue(leave.internal_metadata.is_outlier())
+        self.assertTrue(leave.internal_metadata.is_out_of_band_membership())
+        self.assertIsNone(
+            self.get_success(self.store._get_state_group_for_event(leave.event_id))
+        )
+        for use_state_after in (False, True):
+            with self.subTest(use_state_after=use_state_after):
+                query = urllib.parse.urlencode(
+                    {
+                        "filter": json.dumps(
+                            {"room": {"include_leave": include_leave}}
+                        ),
+                        "use_state_after": str(use_state_after).lower(),
+                    }
+                )
+                channel = self.make_request(
+                    "GET", "/_matrix/client/v3/sync?" + query, access_token=token
+                )
+                self.assertEqual(channel.code, 200, channel.json_body)
+                archived = channel.json_body.get("rooms", {}).get("leave", {})
+                if not rescinded and not include_leave:
+                    self.assertNotIn(room_id, archived)
+                    continue
+                self.assertIn(room_id, archived)
+                result = archived[room_id]
+                self.assertEqual(
+                    [event["event_id"] for event in result["timeline"]["events"]],
+                    [leave.event_id],
+                )
+                self.assertEqual(
+                    result["timeline"]["events"][0]["content"]["membership"],
+                    Membership.LEAVE,
+                )
+                self.assertEqual(
+                    result.get("state_after", result.get("state", {})).get(
+                        "events", []
+                    ),
+                    [],
+                )
+                for timeline_filter in ({"limit": 0}, {"not_types": ["*"]}):
+                    filtered_query = urllib.parse.urlencode(
+                        {
+                            "filter": json.dumps(
+                                {
+                                    "room": {
+                                        "include_leave": include_leave,
+                                        "timeline": timeline_filter,
+                                    }
+                                }
+                            ),
+                            "use_state_after": str(use_state_after).lower(),
+                        }
+                    )
+                    filtered = self.make_request(
+                        "GET",
+                        "/_matrix/client/v3/sync?" + filtered_query,
+                        access_token=token,
+                    )
+                    self.assertEqual(filtered.code, 200, filtered.json_body)
+                    filtered_room = (
+                        filtered.json_body.get("rooms", {})
+                        .get("leave", {})
+                        .get(room_id, {})
+                    )
+                    self.assertEqual(
+                        filtered_room.get("timeline", {}).get("events", []), []
+                    )
 
     def do_sync(
         self, sync_body: JsonDict, *, since: str | None = None, tok: str

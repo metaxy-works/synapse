@@ -41,6 +41,7 @@ from synapse.handlers.sync import (
     SyncResult,
     TimelineBatch,
 )
+from synapse.handlers.typing import TypingWriterHandler
 from synapse.rest import admin
 from synapse.rest.client import knock, login, room
 from synapse.server import HomeServer
@@ -101,6 +102,80 @@ class SyncTestCase(tests.unittest.HomeserverTestCase):
         # AuthBlocking reads from the hs' config on initialization. We need to
         # modify its config instead of the hs'
         self.auth_blocking = self.hs.get_auth_blocking()
+
+    @parameterized.expand([(False,), (True,)])
+    def test_receipts_after_room_finishes_partial_state(
+        self, threaded_collision: bool
+    ) -> None:
+        """A room first included after a partial join needs its receipt snapshot."""
+        alice = self.register_user("alice", "password")
+        alice_token = self.login("alice", "password")
+        bob = self.register_user("bob", "password")
+        bob_token = self.login("bob", "password")
+        room_id = self.helper.create_room_as(alice, tok=alice_token)
+        self.helper.join(room_id, bob, tok=bob_token)
+        root_id = self.helper.send(room_id, "Root", tok=alice_token)["event_id"]
+        event_id = self.helper.send(room_id, "Reply", tok=alice_token)["event_id"]
+        self.get_success(
+            self.store.store_partial_state_room(
+                room_id, {"remote"}, device_lists_stream_id=0, joined_via="remote"
+            )
+        )
+        for receipt_type, thread_id in [
+            ("m.read", None),
+            ("m.read.private", None),
+        ] + ([("m.read", root_id)] if threaded_collision else []):
+            self.get_success(
+                self.store.insert_receipt(
+                    room_id,
+                    receipt_type,
+                    user_id=alice,
+                    event_ids=[event_id],
+                    thread_id=thread_id,
+                    data={},
+                )
+            )
+
+        config = generate_sync_config(bob, use_state_after=self.use_state_after)
+        initial = self.get_success(self.sync_handler.generate_sync_result(config))
+        self.assertEqual(initial.joined, [])
+        self.assertGreater(initial.next_batch.receipt_key.stream, 0)
+        self.assertIsNotNone(
+            self.get_success(self.store.clear_partial_state_room(room_id))
+        )
+
+        typing_handler = cast(TypingWriterHandler, self.hs.get_typing_handler())
+        self.get_success(
+            typing_handler.started_typing(
+                UserID.from_string(alice),
+                create_requester(alice),
+                room_id,
+                timeout=30000,
+            )
+        )
+
+        # No new receipts arrive between the two syncs. Their stream positions
+        # were already consumed while the partial-state room was omitted.
+        result = self.get_success(
+            self.sync_handler.generate_sync_result(
+                config, since_token=initial.next_batch
+            )
+        )
+        self.assertEqual([joined.room_id for joined in result.joined], [room_id])
+        receipts = [
+            event
+            for event in result.joined[0].ephemeral
+            if event["type"] == "m.receipt"
+        ]
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(receipts[0]["content"], {event_id: {"m.read": {alice: {}}}})
+        self.assertEqual(result.next_batch.receipt_key, initial.next_batch.receipt_key)
+        typing = [
+            event for event in result.joined[0].ephemeral if event["type"] == "m.typing"
+        ]
+        self.assertEqual(
+            typing, [{"type": "m.typing", "content": {"user_ids": [alice]}}]
+        )
 
     def test_wait_for_sync_for_user_auth_blocking(self) -> None:
         user_id1 = "@user1:test"
