@@ -1,1 +1,3 @@
 Adapt CI branch references for forks using `main` while preserving upstream `develop` compatibility.
+
+Isolate the OIDC availability test from shared Complement homeservers to prevent federation retry backoff leaking between tests.
