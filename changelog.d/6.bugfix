@@ -1,0 +1,1 @@
+Fix room filters incorrectly excluding room account data and tags from sync responses.
