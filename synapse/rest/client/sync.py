@@ -826,6 +826,15 @@ class SlidingSyncRestServlet(RestServlet):
             request, allow_guest=True, feature=ExperimentalFeature.MSC3575
         )
 
+        # Sliding sync connection state is keyed by user and device. Tokens created
+        # without a device (for example, by the admin login API) cannot use it.
+        if requester.device_id is None:
+            raise SynapseError(
+                400,
+                "Sliding sync requires a device-associated access token.",
+                Codes.MISSING_PARAM,
+            )
+
         user = requester.user
 
         timeout = parse_integer(request, "timeout", default=0)

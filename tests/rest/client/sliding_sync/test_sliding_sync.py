@@ -30,7 +30,9 @@ from synapse.api.constants import (
     Membership,
     RoomTypes,
 )
+from synapse.api.errors import Codes
 from synapse.api.room_versions import RoomVersions
+from synapse.appservice import ApplicationService
 from synapse.events import EventBase, StrippedStateEvent
 from synapse.events.snapshot import EventContext
 from synapse.handlers.sliding_sync import StateValues
@@ -42,6 +44,7 @@ from synapse.types import (
     SlidingSyncStreamToken,
     StreamKeyType,
     StreamToken,
+    UserID,
 )
 from synapse.util.clock import Clock
 from synapse.util.duration import Duration
@@ -481,6 +484,98 @@ class SlidingSyncTestCase(SlidingSyncBase):
         self.persistence = persistence
 
         super().prepare(reactor, clock, hs)
+
+    @parameterized.expand([(False, False), (False, True), (True, False), (True, True)])
+    def test_sync_requires_device(self, has_room: bool, incremental: bool) -> None:
+        """Device-less tokens must fail explicitly, even before joining any rooms."""
+        admin_id = self.register_user("admin", "pass", admin=True)
+        admin_token = self.login(admin_id, "pass")
+        user_id = self.register_user("user", "pass")
+        device_token = self.login(user_id, "pass")
+        if has_room:
+            self.helper.create_room_as(user_id, tok=device_token)
+
+        channel = self.make_request(
+            "POST",
+            f"/_synapse/admin/v1/users/{urllib.parse.quote(user_id)}/login",
+            {},
+            access_token=admin_token,
+        )
+        self.assertEqual(channel.code, 200, channel.json_body)
+        token = channel.json_body["access_token"]
+        token_info = self.get_success(self.store.get_user_by_access_token(token))
+        assert token_info is not None
+        self.assertIsNone(token_info.device_id)
+
+        sync_body = {
+            "lists": {
+                "all": {"ranges": [[0, 20]], "required_state": [], "timeline_limit": 1}
+            }
+        }
+        # A normal device can still start and continue the same connection.
+        _, pos = self.do_sync(sync_body, tok=device_token)
+        self.do_sync(sync_body, tok=device_token, since=pos)
+        channel = self.make_sync_request(
+            sync_body, tok=token, since=pos if incremental else None
+        )
+        self.assertEqual(channel.code, 400, channel.json_body)
+        self.assertEqual(channel.json_body["errcode"], Codes.MISSING_PARAM)
+
+        # Legacy sync supports these tokens and must retain that behavior.
+        channel = self.make_request("GET", "/sync", access_token=token)
+        self.assertEqual(channel.code, 200, channel.json_body)
+
+    def test_sync_appservice_device(self) -> None:
+        """Appservice virtual users need a real device, with normal auth checks."""
+        service = ApplicationService(
+            id="sliding-sync-test",
+            token="appservice-token",
+            sender=UserID.from_string("@asbot:test"),
+            namespaces={"users": [{"regex": r"@as_user.*", "exclusive": False}]},
+        )
+        self.store.services_cache.append(service)
+        user_id = self.register_user("as_user", "pass")
+        device_token = self.login(user_id, "pass", device_id="device")
+        room_id = self.helper.create_room_as(user_id, tok=device_token)
+        sync_body = {
+            "room_subscriptions": {room_id: {"required_state": [], "timeline_limit": 1}}
+        }
+        query = urllib.parse.urlencode({"user_id": user_id})
+        url = f"{self.sync_endpoint}?{query}"
+
+        channel = self.make_request("POST", url, sync_body, access_token=service.token)
+        self.assertEqual(channel.code, 400, channel.json_body)
+        self.assertEqual(channel.json_body["errcode"], Codes.MISSING_PARAM)
+
+        channel = self.make_request(
+            "POST", url + "&device_id=device", sync_body, access_token=service.token
+        )
+        self.assertEqual(channel.code, 200, channel.json_body)
+        self.assertIn(room_id, channel.json_body["rooms"])
+        pos = channel.json_body["pos"]
+        channel = self.make_request(
+            "POST",
+            url + "&" + urllib.parse.urlencode({"device_id": "device", "pos": pos}),
+            sync_body,
+            access_token=service.token,
+        )
+        self.assertEqual(channel.code, 200, channel.json_body)
+
+        channel = self.make_request(
+            "POST", url + "&device_id=missing", sync_body, access_token=service.token
+        )
+        self.assertEqual(channel.code, 400, channel.json_body)
+        self.assertEqual(channel.json_body["errcode"], Codes.UNKNOWN_DEVICE)
+
+        outside_id = self.register_user("outside", "pass")
+        channel = self.make_request(
+            "POST",
+            self.sync_endpoint + "?" + urllib.parse.urlencode({"user_id": outside_id}),
+            sync_body,
+            access_token=service.token,
+        )
+        self.assertEqual(channel.code, 403, channel.json_body)
+        self.assertEqual(channel.json_body["errcode"], Codes.FORBIDDEN)
 
     def test_sync_list(self) -> None:
         """
