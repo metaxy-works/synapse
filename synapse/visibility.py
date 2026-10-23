@@ -81,6 +81,8 @@ async def filter_and_transform_events_for_client(
     is_peeking: bool = False,
     always_include_ids: frozenset[str] = frozenset(),
     filter_send_to_client: bool = True,
+    *,
+    filter_ignored_users: bool = True,
 ) -> list[FilteredEvent]:
     """
     Check which events a user is allowed to see. If the user can see the event but its
@@ -99,6 +101,8 @@ async def filter_and_transform_events_for_client(
         filter_send_to_client: Whether we're checking an event that's going to be
             sent to a client. This might not always be the case since this function can
             also be called to check whether a user can see the state at a given point.
+        filter_ignored_users: Whether to hide events from ignored senders. Disable
+            only when checking access without delivering the event to the client.
 
     Returns:
         The filtered events, wrapped in FilteredEvent with the requesting user's
@@ -163,7 +167,11 @@ async def filter_and_transform_events_for_client(
     )
 
     # Get the users who are ignored by the requesting user.
-    ignore_list = await storage.main.ignored_users(user_id)
+    ignore_list = (
+        await storage.main.ignored_users(user_id)
+        if filter_ignored_users
+        else frozenset()
+    )
 
     erased_senders = await storage.main.are_users_erased(e.sender for e in events)
 

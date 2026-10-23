@@ -154,6 +154,8 @@ class EventHandler:
         room_id: str | None,
         event_id: str,
         show_redacted: bool = False,
+        *,
+        filter_ignored_users: bool = True,
     ) -> FilteredEvent | None:
         """Retrieve a single specified event on behalf of a user.
         The event will be transformed in a user-specific and time-specific way,
@@ -165,6 +167,8 @@ class EventHandler:
                 event's room does not match.
             event_id: The event ID to obtain.
             show_redacted: Should the full content of redacted events be returned?
+            filter_ignored_users: Whether to hide events from ignored senders.
+                Disable only for access checks that do not return the event to a client.
         Returns:
             An event, or None if there is no event matching this ID.
         Raises:
@@ -194,6 +198,7 @@ class EventHandler:
             user.to_string(),
             [event],
             is_peeking=is_peeking,
+            filter_ignored_users=filter_ignored_users,
         )
 
         if not filtered:
