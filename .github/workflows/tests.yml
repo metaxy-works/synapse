@@ -25,80 +25,50 @@ env:
   RUST_NIGHTLY_VERSION: nightly-2025-03-27 # last nightly before 1.88.0
 
 jobs:
-  # Job to detect what has changed so we don't run e.g. Rust checks on PRs that
-  # don't modify Rust code.
+  # Classify the whole PR, not just its latest commit. All non-PR events and
+  # unknown/incomplete diffs run every group. Never skip the workflow itself.
   changes:
     runs-on: ubuntu-latest
     outputs:
-      rust: ${{ !startsWith(github.ref, 'refs/pull/') || steps.filter.outputs.rust }}
-      trial: ${{ !startsWith(github.ref, 'refs/pull/') || steps.filter.outputs.trial }}
-      integration: ${{ !startsWith(github.ref, 'refs/pull/') || steps.filter.outputs.integration }}
-      linting: ${{ !startsWith(github.ref, 'refs/pull/') || steps.filter.outputs.linting }}
-      linting_readme: ${{ !startsWith(github.ref, 'refs/pull/') || steps.filter.outputs.linting_readme }}
-      golangci: ${{ !startsWith(github.ref, 'refs/pull/') || steps.filter.outputs.golangci }}
+      rust: ${{ steps.select.outputs.rust }}
+      trial: ${{ steps.select.outputs.trial }}
+      integration: ${{ steps.select.outputs.integration }}
+      complement: ${{ steps.select.outputs.complement }}
+      linting: ${{ steps.select.outputs.linting }}
+      linting_readme: ${{ steps.select.outputs.linting_readme }}
+      golangci: ${{ steps.select.outputs.golangci }}
+      skippable_tests: ${{ steps.select.outputs.skippable_tests }}
+      skippable_lint: ${{ steps.select.outputs.skippable_lint }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
-        # We only check on PRs
-        if: startsWith(github.ref, 'refs/pull/')
+        # GitHub's PR files API returns at most 3000 files. Fall back to full
+        # regression at that limit, or if discovery fails (e.g. token access).
+        if: github.event_name == 'pull_request' && github.event.pull_request.changed_files < 3000
+        continue-on-error: true
         with:
+          list-files: json
           filters: |
-            rust:
-              - 'rust/**'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - '.rustfmt.toml'
-              - '.github/workflows/tests.yml'
+            all: ['**']
+      - name: Select affected check groups
+        id: select
+        run: python3 .ci/scripts/select_checks.py
+        env:
+          FILTER_OUTCOME: ${{ steps.filter.outcome }}
+          CHANGED_FILES: ${{ steps.filter.outputs.all_files }}
+          CHANGED_FILE_COUNT: ${{ github.event.pull_request.changed_files }}
 
-            trial:
-              - 'synapse/**'
-              - 'tests/**'
-              - 'rust/**'
-              - '.ci/scripts/calculate_jobs.py'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'pyproject.toml'
-              - 'poetry.lock'
-              - '.github/workflows/tests.yml'
-
-            integration:
-              - 'synapse/**'
-              - 'rust/**'
-              - 'docker/**'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'pyproject.toml'
-              - 'poetry.lock'
-              - 'docker/**'
-              - '.ci/**'
-              - '.github/workflows/tests.yml'
-              - 'scripts-dev/complement.sh'
-              - '.github/workflows/complement_tests.yml'
-              - 'complement/**'
-
-            linting:
-              - 'synapse/**'
-              - 'docker/**'
-              - 'tests/**'
-              - 'scripts-dev/**'
-              - 'contrib/**'
-              - 'synmark/**'
-              - 'stubs/**'
-              - '.ci/**'
-              - 'mypy.ini'
-              - 'pyproject.toml'
-              - 'poetry.lock'
-              - '.github/workflows/tests.yml'
-
-            golangci:
-              - 'complement/**/*.go'
-              - 'complement/.golangci.yml'
-              - 'complement/go.mod'
-              - 'complement/go.sum'
-              - '.github/workflows/tests.yml'
-
-            linting_readme:
-              - 'README.rst'
+  # Keep selection and workflow-contract tests running even on docs-only PRs.
+  ci-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.10"
+      - run: python -m pip install PyYAML==6.0.3
+      - run: python -m unittest discover -s .ci/tests -v
 
   check-sampleconfig:
     runs-on: ubuntu-latest
@@ -193,6 +163,10 @@ jobs:
           install-project: "true"
           poetry-version: "2.4.1"
 
+      - name: Identify mypy's Python environment
+        id: mypy-cache-key
+        run: echo "python=$(poetry run python -c 'import platform; print(platform.python_version())')" >> "$GITHUB_OUTPUT"
+
       # Cribbed from
       # https://github.com/AustinScola/mypy-cache-github-action/blob/85ea4f2972abed39b33bd02c36e341b28ca59213/src/restore.ts#L10-L17
       - name: Restore/persist mypy's cache
@@ -200,8 +174,8 @@ jobs:
         with:
           path: |
             .mypy_cache
-          key: mypy-cache-${{ github.context.sha }}
-          restore-keys: mypy-cache-
+          key: mypy-v2-${{ runner.os }}-${{ runner.arch }}-py${{ steps.mypy-cache-key.outputs.python }}-${{ hashFiles('poetry.lock', 'pyproject.toml', 'mypy.ini') }}-${{ github.sha }}
+          restore-keys: mypy-v2-${{ runner.os }}-${{ runner.arch }}-py${{ steps.mypy-cache-key.outputs.python }}-${{ hashFiles('poetry.lock', 'pyproject.toml', 'mypy.ini') }}-
 
       - name: Run mypy
         run: poetry run mypy
@@ -357,6 +331,8 @@ jobs:
   linting-done:
     if: ${{ !cancelled() }} # Run this even if prior jobs were skipped
     needs:
+      - changes
+      - ci-policy
       - lint
       - lint-mypy
       - lint-crlf
@@ -376,19 +352,11 @@ jobs:
         with:
           needs: ${{ toJSON(needs) }}
 
-          # Various bits are skipped if there was no applicable changes.
+          # Only jobs excluded by the selector may be skipped. A selected job
+          # that fails, is cancelled, or unexpectedly skips must fail this gate.
           skippable: |
-            check-sampleconfig
-            check-schema-delta
-            lint
-            lint-mypy
-            lint-newsfile
-            lint-clippy
-            lint-clippy-nightly
-            lint-rust
-            lint-rustfmt
-            lint-golangci
-            lint-readme
+            ${{ needs.changes.outputs.skippable_lint }}
+            ${{ !(github.event_name == 'pull_request' && (github.base_ref == github.event.repository.default_branch || contains(github.base_ref, 'release-')) && github.event.pull_request.user.login != 'dependabot[bot]') && 'lint-newsfile' || '' }}
 
   calculate-test-jobs:
     if: ${{ !cancelled() && !failure() }} # Allow previous steps to be skipped, but not fail
@@ -710,7 +678,9 @@ jobs:
 
   complement:
     uses: ./.github/workflows/complement_tests.yml
-    if: "${{ !failure() && !cancelled() && needs.changes.outputs.integration == 'true' }}"
+    if: "${{ !failure() && !cancelled() && needs.changes.outputs.complement == 'true' }}"
+    with:
+      run_external_tests: ${{ needs.changes.outputs.integration == 'true' }}
     needs:
       - linting-done
       - changes
@@ -763,6 +733,8 @@ jobs:
   tests-done:
     if: ${{ always() }}
     needs:
+      - changes
+      - calculate-test-jobs
       - trial
       - trial-olddeps
       - sytest
@@ -778,15 +750,5 @@ jobs:
         with:
           needs: ${{ toJSON(needs) }}
 
-          # Various bits are skipped if there was no applicable changes.
-          # The newsfile lint may be skipped on non PR builds.
-          skippable: |
-            trial
-            trial-olddeps
-            sytest
-            portdb
-            export-data
-            complement
-            lint-newsfile
-            cargo-test
-            cargo-bench
+          # Do not let unexpected skips masquerade as a passing regression.
+          skippable: ${{ needs.changes.outputs.skippable_tests }}
