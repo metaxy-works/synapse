@@ -1,0 +1,1 @@
+Fix room purges leaving behind retention policy records, which could prevent a server from rejoining the room.

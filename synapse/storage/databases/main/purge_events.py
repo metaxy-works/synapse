@@ -84,6 +84,7 @@ purge_room_tables_with_room_id_column = (
     "receipts_linearized",
     "room_aliases",
     "room_depth",
+    "room_retention",
     "room_stats_state",
     "room_stats_current",
     "room_stats_earliest_token",

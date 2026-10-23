@@ -37,7 +37,7 @@ from synapse.types.storage import _BackgroundUpdates
 from synapse.util.clock import Clock
 
 from tests.test_utils.event_builders import make_test_pdu_event
-from tests.unittest import HomeserverTestCase
+from tests.unittest import HomeserverTestCase, override_config
 
 
 class PurgeTests(HomeserverTestCase):
@@ -142,6 +142,57 @@ class PurgeTests(HomeserverTestCase):
         self.store._invalidate_local_get_event_cache(create_event.event_id)
         self.get_failure(self.store.get_event(create_event.event_id), NotFoundError)
         self.get_failure(self.store.get_event(first["event_id"]), NotFoundError)
+
+    @override_config({"retention": {"enabled": True}})
+    def test_purge_room_retention(self) -> None:
+        """Purge historical retention policies and invalidate the cached policy."""
+        other_room = self.helper.create_room_as(self.user_id)
+        for room_id, lifetime in [
+            (self.room_id, 86400000),
+            (self.room_id, 172800000),
+            (other_room, 259200000),
+        ]:
+            self.helper.send_state(
+                room_id,
+                EventTypes.Retention,
+                {"max_lifetime": lifetime},
+            )
+
+        policies = self.get_success(
+            self.store.db_pool.simple_select_list(
+                "room_retention", {"room_id": self.room_id}, ("event_id",)
+            )
+        )
+        self.assertEqual(len(policies), 2)
+        policy = self.get_success(
+            self.store.get_retention_policy_for_room(self.room_id)
+        )
+        self.assertEqual(policy.max_lifetime, 172800000)
+
+        self.get_success(
+            self._storage_controllers.purge_events.purge_room(self.room_id)
+        )
+
+        policies = self.get_success(
+            self.store.db_pool.simple_select_list(
+                "room_retention", {"room_id": self.room_id}, ("event_id",)
+            )
+        )
+        self.assertEqual(policies, [])
+        policy = self.get_success(
+            self.store.get_retention_policy_for_room(self.room_id)
+        )
+        self.assertIsNone(policy.max_lifetime)
+        other_policies = self.get_success(
+            self.store.db_pool.simple_select_list(
+                "room_retention", {"room_id": other_room}, ("event_id",)
+            )
+        )
+        self.assertEqual(len(other_policies), 1)
+        other_policy = self.get_success(
+            self.store.get_retention_policy_for_room(other_room)
+        )
+        self.assertEqual(other_policy.max_lifetime, 259200000)
 
     def test_purge_history_deletes_state_groups(self) -> None:
         """Test that unreferenced state groups get cleaned up after purge"""
