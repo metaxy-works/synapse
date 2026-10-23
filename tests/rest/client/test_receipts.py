@@ -20,12 +20,20 @@
 #
 from http import HTTPStatus
 
+from parameterized import parameterized
+
 from twisted.internet.testing import MemoryReactor
 
 import synapse.rest.admin
-from synapse.api.constants import EduTypes, EventTypes, HistoryVisibility, ReceiptTypes
+from synapse.api.constants import (
+    AccountDataTypes,
+    EduTypes,
+    EventTypes,
+    HistoryVisibility,
+    ReceiptTypes,
+)
 from synapse.api.errors import Codes
-from synapse.rest.client import login, receipts, room, sync
+from synapse.rest.client import login, read_marker, receipts, room, sync
 from synapse.server import HomeServer
 from synapse.types import JsonDict
 from synapse.util.clock import Clock
@@ -37,6 +45,7 @@ class ReceiptsTestCase(unittest.HomeserverTestCase):
     servlets = [
         login.register_servlets,
         receipts.register_servlets,
+        read_marker.register_servlets,
         synapse.rest.admin.register_servlets,
         room.register_servlets,
         sync.register_servlets,
@@ -110,7 +119,8 @@ class ReceiptsTestCase(unittest.HomeserverTestCase):
         self.assertEqual(channel.code, 200, channel.result)
         self.assertIsNone(self._get_read_receipt())
 
-    def test_send_receipt_unviewable_event(self) -> None:
+    @parameterized.expand([(False,), (True,)])
+    def test_send_receipt_unviewable_event(self, ignore_sender: bool) -> None:
         """Receipts sent for unviewable events are errors."""
         # Create a room where new users can't see events from before their join
         # & send events into it.
@@ -129,6 +139,15 @@ class ReceiptsTestCase(unittest.HomeserverTestCase):
             },
         )
         res = self.helper.send(room_id, body="hello", tok=self.tok)
+
+        if ignore_sender:
+            self.get_success(
+                self.hs.get_account_data_handler().add_account_data_for_user(
+                    self.user2,
+                    AccountDataTypes.IGNORED_USER_LIST,
+                    {"ignored_users": {self.user_id: {}}},
+                )
+            )
 
         # Attempt to send a receipt from the wrong user.
         channel = self.make_request(
@@ -150,6 +169,78 @@ class ReceiptsTestCase(unittest.HomeserverTestCase):
             access_token=self.tok2,
         )
         self.assertEqual(channel.code, 403, channel.result)
+
+    @parameterized.expand(
+        [
+            (endpoint, receipt_type)
+            for endpoint in ("receipt", "read_markers")
+            for receipt_type in (ReceiptTypes.READ, ReceiptTypes.READ_PRIVATE)
+        ]
+    )
+    @unittest.override_config({"experimental_features": {"msc2654_enabled": True}})
+    def test_read_receipt_for_ignored_sender(
+        self, endpoint: str, receipt_type: str
+    ) -> None:
+        """Ignoring a sender must not prevent marking their old messages as read."""
+        event_id = self.helper.send(self.room_id, body="hello", tok=self.tok)[
+            "event_id"
+        ]
+        channel = self.make_request("GET", "/sync", access_token=self.tok2)
+        self.assertEqual(channel.code, 200, channel.result)
+        room_data = channel.json_body["rooms"]["join"][self.room_id]
+        self.assertIn(
+            event_id, [e["event_id"] for e in room_data["timeline"]["events"]]
+        )
+        self.assertEqual(room_data["org.matrix.msc2654.unread_count"], 1)
+
+        self.get_success(
+            self.hs.get_account_data_handler().add_account_data_for_user(
+                self.user2,
+                AccountDataTypes.IGNORED_USER_LIST,
+                {"ignored_users": {self.user_id: {}}},
+            )
+        )
+
+        content = {}
+        if endpoint == "receipt":
+            path = f"/rooms/{self.room_id}/receipt/{receipt_type}/{event_id}"
+        else:
+            path = f"/rooms/{self.room_id}/read_markers"
+            content = {
+                ReceiptTypes.FULLY_READ: event_id,
+                receipt_type: event_id,
+            }
+        channel = self.make_request("POST", path, content, access_token=self.tok2)
+        self.assertEqual(channel.code, 200, channel.result)
+        self.assertEqual(
+            self.get_success(
+                self.store.get_receipts_for_user(self.user2, [receipt_type])
+            ),
+            {self.room_id: event_id},
+        )
+        if endpoint == "read_markers":
+            self.assertEqual(self._get_fully_read_marker(), event_id)
+
+        # Normal event delivery still hides the ignored sender's message.
+        channel = self.make_request(
+            "GET",
+            f"/rooms/{self.room_id}/event/{event_id}",
+            access_token=self.tok2,
+        )
+        self.assertEqual(channel.code, 404, channel.result)
+        channel = self.make_request("GET", "/sync", access_token=self.tok2)
+        self.assertEqual(channel.code, 200, channel.result)
+        room_data = channel.json_body["rooms"]["join"][self.room_id]
+        self.assertNotIn(
+            event_id, [e["event_id"] for e in room_data["timeline"]["events"]]
+        )
+        self.assertEqual(room_data["org.matrix.msc2654.unread_count"], 0)
+
+        # Private receipts must not be disclosed to the sender.
+        if receipt_type == ReceiptTypes.READ_PRIVATE:
+            self.assertIsNone(self._get_read_receipt())
+        else:
+            self.assertIsNotNone(self._get_read_receipt())
 
     def test_send_receipt_invalid_room_id(self) -> None:
         channel = self.make_request(

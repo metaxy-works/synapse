@@ -196,8 +196,11 @@ class ReceiptsHandler:
         """
 
         # Ensure the room/event exists, this will raise an error if the user
-        # cannot view the event.
-        if not await self.event_handler.get_event(user_id, room_id, event_id):
+        # cannot view the event. Ignoring a sender hides their messages, but must
+        # not prevent marking previously received messages as read.
+        if not await self.event_handler.get_event(
+            user_id, room_id, event_id, filter_ignored_users=False
+        ):
             return
 
         receipt = ReadReceipt(
