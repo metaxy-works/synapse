@@ -1,0 +1,1 @@
+Adapt CI branch references for forks using `main` while preserving upstream `develop` compatibility.
