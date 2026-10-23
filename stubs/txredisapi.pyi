@@ -18,9 +18,12 @@
 from typing import Any
 
 from twisted.internet import protocol
-from twisted.internet.defer import Deferred
+from twisted.internet.defer import Deferred, DeferredQueue
 from twisted.internet.interfaces import IAddress
 from twisted.python.failure import Failure
+
+class RedisError(Exception): ...
+class ResponseError(RedisError): ...
 
 class RedisProtocol(protocol.Protocol):
     def publish(self, channel: str, message: bytes) -> "Deferred[None]": ...
@@ -70,6 +73,7 @@ class UnixConnectionHandler(ConnectionHandler): ...
 
 class RedisFactory(protocol.ReconnectingClientFactory):
     continueTrying: bool
+    connectionQueue: DeferredQueue[RedisProtocol]
     handler: ConnectionHandler
     pool: list[RedisProtocol]
     replyTimeout: int | None

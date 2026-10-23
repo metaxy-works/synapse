@@ -3,6 +3,8 @@ from typing import Callable, Collection
 from unittest import mock
 from unittest.mock import Mock
 
+from parameterized import parameterized
+
 from twisted.internet.testing import MemoryReactor
 
 from synapse.api.constants import EventTypes
@@ -153,6 +155,95 @@ class FederationCatchUpTestCases(_FederationCatchUpTestCaseBase):
     By default, federation is disabled for test cases. `_FederationCatchUpTestCaseBase` has it
     re-enabled for the main process.
     """
+
+    @parameterized.expand([("join",), ("leave",)])
+    def test_self_membership_with_outlier_predecessor(self, membership: str) -> None:
+        """An OOB invite can lack state when its local response is federated."""
+        alice = self.register_user("alice", "password")
+        alice_token = self.login("alice", "password")
+        bob = self.register_user("bob", "password")
+        room_id = self.helper.create_room_as(alice, tok=alice_token)
+        remote = "@user:host2"
+        self.get_success(
+            event_injection.inject_member_event(self.hs, room_id, remote, "join")
+        )
+        invite = self.get_success(
+            event_injection.inject_member_event(
+                self.hs, room_id, remote, "invite", target=bob
+            )
+        )
+        event, context = self.get_success(
+            event_injection.create_event(
+                self.hs,
+                room_id=room_id,
+                type=EventTypes.Member,
+                sender=bob,
+                state_key=bob,
+                content={"membership": membership},
+            )
+        )
+        self.assertIn(invite.event_id, event.prev_event_ids())
+        persistence = self.hs.get_storage_controllers().persistence
+        assert persistence is not None
+        _, _, token = self.get_success(persistence.persist_event(event, context))
+
+        # Reproduce the state visible to the sender: the local response has its
+        # full context, but its OOB predecessor has not been de-outliered yet.
+        store = self.hs.get_datastores().main
+        self.get_success(
+            store.db_pool.simple_delete(
+                table="event_to_state_groups",
+                keyvalues={"event_id": invite.event_id},
+                desc="test_invite_without_state",
+            )
+        )
+        self.get_success(
+            store.db_pool.simple_update_one(
+                table="events",
+                keyvalues={"event_id": invite.event_id},
+                updatevalues={"outlier": True},
+            )
+        )
+        store._get_state_group_for_event.invalidate((invite.event_id,))
+        self.federation_sender.notify_new_events(token)
+        self.pump()
+
+        self.assertTrue(
+            any(
+                pdu.get("state_key") == bob
+                and pdu["content"].get("membership") == membership
+                for pdu in self.pdus
+            ),
+            "The local membership response was not sent to the remote server",
+        )
+        self.assertEqual(self.get_destination_room(room_id)["event_id"], event.event_id)
+
+    def test_kick_last_remote_member_uses_previous_state(self) -> None:
+        """A kick must still reach a server absent from the state after it."""
+        alice = self.register_user("alice", "password")
+        alice_token = self.login("alice", "password")
+        room_id = self.helper.create_room_as(alice, tok=alice_token)
+        remote = "@user:host2"
+        self.get_success(
+            event_injection.inject_member_event(self.hs, room_id, remote, "join")
+        )
+        event = self.get_success(
+            event_injection.inject_member_event(
+                self.hs, room_id, alice, "leave", target=remote
+            )
+        )
+        self.federation_sender.notify_new_events(
+            self.hs.get_datastores().main.get_room_max_token()
+        )
+        self.pump()
+        self.assertTrue(
+            any(
+                pdu.get("state_key") == remote
+                and pdu["content"].get("membership") == "leave"
+                for pdu in self.pdus
+            )
+        )
+        self.assertEqual(self.get_destination_room(room_id)["event_id"], event.event_id)
 
     def test_catch_up_destination_rooms_tracking(self) -> None:
         """

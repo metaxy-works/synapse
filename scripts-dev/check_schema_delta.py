@@ -4,6 +4,7 @@
 #
 # Also checks that schema deltas do not try and create or drop indices.
 
+import os
 import re
 from typing import Any
 
@@ -21,7 +22,7 @@ AUTO_INCREMENT_PRIMARY_KEYPLACEHOLDER = "$%AUTO_INCREMENT_PRIMARY_KEY%$"
 
 # The base branch we want to check against. We use the main development branch
 # on the assumption that is what we are developing against.
-DEVELOP_BRANCH = "develop"
+DEVELOP_BRANCH = os.environ.get("SYNAPSE_DEFAULT_BRANCH") or "develop"
 
 
 @click.command()

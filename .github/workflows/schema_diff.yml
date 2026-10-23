@@ -81,7 +81,7 @@ jobs:
           PGPASSWORD: postgres
         run: |
           poetry run python .ci/scripts/schema_diff.py \
-            --base origin/develop \
+            --base "origin/$GITHUB_BASE_REF" \
             > "${{ runner.temp }}/schema_diff.md"
 
       - name: Stop postgres

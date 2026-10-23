@@ -20,6 +20,8 @@
 #
 
 
+from parameterized import parameterized
+
 from twisted.internet.testing import MemoryReactor
 
 from synapse.api.constants import MAIN_TIMELINE, EventContentFields, RelationTypes
@@ -563,6 +565,148 @@ class EventPushActionsStoreTestCase(HomeserverTestCase):
 
         self.assertEqual(_badge(room_id), 1)
         self.assertEqual(_badge(stale_room_id), 2)
+
+    @parameterized.expand(
+        [
+            ("m.read", True),
+            ("m.read", False),
+            ("m.read.private", True),
+            ("m.read.private", False),
+        ]
+    )
+    def test_receipt_invalidates_new_null_summary(
+        self, receipt_type: str, threaded: bool
+    ) -> None:
+        """A receipt must take effect before the next summary rotation."""
+        user_id, _, _, other_token, room_id = self._create_users_and_room()
+        root_id = self.helper.send(room_id, "Root", tok=other_token)["event_id"]
+        replies = [
+            self.helper.send_event(
+                room_id,
+                type="m.room.message",
+                content={
+                    "msgtype": "m.text",
+                    "body": "Reply",
+                    "m.relates_to": {
+                        "rel_type": RelationTypes.THREAD,
+                        "event_id": root_id,
+                    },
+                },
+                tok=other_token,
+            )["event_id"]
+            for _ in range(3)
+        ]
+        self.get_success(self.store._rotate_notifs())
+        self.assertIsNone(
+            self.get_success(
+                self.store.db_pool.simple_select_one_onecol(
+                    table="event_push_summary",
+                    keyvalues={
+                        "room_id": room_id,
+                        "user_id": user_id,
+                        "thread_id": root_id,
+                    },
+                    retcol="last_receipt_stream_ordering",
+                )
+            )
+        )
+        # Prime the normal cached getter before the new receipt.
+        self.get_success(
+            self.store.get_unread_event_push_actions_by_room_for_user(room_id, user_id)
+        )
+        self.get_success(
+            self.store.insert_receipt(
+                room_id,
+                receipt_type,
+                user_id=user_id,
+                event_ids=[replies[0]],
+                thread_id=root_id if threaded else None,
+                data={},
+            )
+        )
+
+        def assert_counts() -> None:
+            for counts in (
+                self.get_success(
+                    self.store.get_unread_event_push_actions_by_room_for_user(
+                        room_id, user_id
+                    )
+                ),
+                self.get_success(
+                    self.store.db_pool.runInteraction(
+                        "unread-counts-after-receipt",
+                        self.store._get_unread_counts_by_receipt_txn,
+                        room_id,
+                        user_id,
+                    )
+                ),
+            ):
+                self.assertEqual(counts.threads[root_id].notify_count, 2)
+                self.assertEqual(counts.main_timeline.notify_count, int(threaded))
+            aggregate = self.get_success(
+                self.store.db_pool.runInteraction(
+                    "aggregate-counts-after-receipt",
+                    self.store._get_unread_counts_by_room_for_user_txn,
+                    user_id,
+                )
+            )
+            self.assertEqual(aggregate.get(room_id, 0), 2 + int(threaded))
+
+        assert_counts()
+        self.get_success(self.store._rotate_notifs())
+        assert_counts()
+
+    def test_legacy_null_summary_with_non_advancing_private_receipt(self) -> None:
+        """A private receipt at an already-read event must retain archived counts."""
+        user_id, _, _, other_token, room_id = self._create_users_and_room()
+        read_id = self.helper.send(room_id, "Read", tok=other_token)["event_id"]
+        for _ in range(2):
+            self.helper.send(room_id, "Unread", tok=other_token)
+        self.get_success(
+            self.store.insert_receipt(
+                room_id,
+                "m.read",
+                user_id=user_id,
+                event_ids=[read_id],
+                thread_id=None,
+                data={},
+            )
+        )
+        self.get_success(self.store._rotate_notifs())
+        # Legacy summaries have a null baseline and can outlive the raw rows.
+        self.get_success(
+            self.store.db_pool.simple_update(
+                table="event_push_summary",
+                keyvalues={"user_id": user_id, "room_id": room_id},
+                updatevalues={"last_receipt_stream_ordering": None},
+                desc="legacy-summary-baseline",
+            )
+        )
+        self.get_success(
+            self.store.db_pool.simple_delete(
+                table="event_push_actions",
+                keyvalues={"user_id": user_id, "room_id": room_id},
+                desc="archive-summarised-actions",
+            )
+        )
+        self.get_success(
+            self.store.insert_receipt(
+                room_id,
+                "m.read.private",
+                user_id=user_id,
+                event_ids=[read_id],
+                thread_id=None,
+                data={},
+            )
+        )
+        counts = self.get_success(
+            self.store.get_unread_event_push_actions_by_room_for_user(room_id, user_id)
+        )
+        self.assertEqual(counts.main_timeline.notify_count, 2)
+        aggregate = self.get_success(
+            self.store.get_unread_counts_by_room_for_user(user_id)
+        )
+        self.assertEqual(aggregate[room_id], 2)
 
     def test_count_aggregation_threads(self) -> None:
         """

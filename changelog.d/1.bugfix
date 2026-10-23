@@ -1,0 +1,9 @@
+Fix sync errors and missing receipts after federated joins, and stale unread counts while read receipts await summary processing.
+
+Fix missing federated membership updates when responding to out-of-band invites.
+
+Fix initial sync omitting out-of-band invite rejections and rescissions.
+
+Fix `SortedItemsView` membership typing for clean type-checking runs.
+
+Fix replication startup when the Redis subscriber connects before the outbound pool with logging-context checks enabled.

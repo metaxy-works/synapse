@@ -430,7 +430,31 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
             WHERE user_id = ?
                 AND notif_count != 0
                 AND (
-                    (last_receipt_stream_ordering IS NULL AND stream_ordering > {max_clause})
+                    (last_receipt_stream_ordering IS NULL
+                        AND stream_ordering > {max_clause}
+                        AND NOT EXISTS (
+                            SELECT 1 FROM receipts_linearized AS r
+                            WHERE r.user_id = eps.user_id
+                                AND r.room_id = eps.room_id
+                                AND (r.thread_id IS NULL OR r.thread_id = eps.thread_id)
+                                AND r.receipt_type IN ('{ReceiptTypes.READ}', '{ReceiptTypes.READ_PRIVATE}')
+                                AND r.event_stream_ordering IS NOT NULL
+                                AND r.stream_id > (
+                                    SELECT stream_id FROM event_push_summary_last_receipt_stream_id
+                                )
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM receipts_linearized AS processed
+                                    WHERE processed.user_id = eps.user_id
+                                        AND processed.room_id = eps.room_id
+                                        AND (processed.thread_id IS NULL OR processed.thread_id = eps.thread_id)
+                                        AND processed.receipt_type IN ('{ReceiptTypes.READ}', '{ReceiptTypes.READ_PRIVATE}')
+                                        AND processed.stream_id <= (
+                                            SELECT stream_id FROM event_push_summary_last_receipt_stream_id
+                                        )
+                                        AND processed.event_stream_ordering >= r.event_stream_ordering
+                                )
+                        )
+                    )
                     OR last_receipt_stream_ordering = {max_clause}
                 )
         """
@@ -605,14 +629,14 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
         # We then do a manual count of all the rows in the `event_push_actions` table
         # for any user/room/thread which did not have a valid summary found.
         #
-        # If `last_receipt_stream_ordering` is null then that means it's up-to-date
-        # (as the row was written by an older version of Synapse that
-        # updated `event_push_summary` synchronously when persisting a new read
-        # receipt).
+        # A null receipt baseline can belong to a legacy summary or a summary
+        # created before the first receipt. It is only valid if there are no
+        # applicable receipts awaiting background summary processing which
+        # advance the read position beyond an already-processed receipt.
         txn.execute(
             f"""
                 SELECT notif_count, COALESCE(unread_count, 0), thread_id
-                FROM event_push_summary
+                FROM event_push_summary AS eps
                 LEFT JOIN (
                     SELECT thread_id, MAX(event_stream_ordering) AS threaded_receipt_stream_ordering
                     FROM receipts_linearized
@@ -625,7 +649,31 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
                 ) AS receipts USING (thread_id)
                 WHERE room_id = ? AND user_id = ?
                 AND (
-                    (last_receipt_stream_ordering IS NULL AND stream_ordering > COALESCE(threaded_receipt_stream_ordering, ?))
+                    (last_receipt_stream_ordering IS NULL
+                        AND stream_ordering > COALESCE(threaded_receipt_stream_ordering, ?)
+                        AND NOT EXISTS (
+                            SELECT 1 FROM receipts_linearized AS r
+                            WHERE r.user_id = eps.user_id
+                                AND r.room_id = eps.room_id
+                                AND (r.thread_id IS NULL OR r.thread_id = eps.thread_id)
+                                AND r.receipt_type IN ('{ReceiptTypes.READ}', '{ReceiptTypes.READ_PRIVATE}')
+                                AND r.event_stream_ordering IS NOT NULL
+                                AND r.stream_id > (
+                                    SELECT stream_id FROM event_push_summary_last_receipt_stream_id
+                                )
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM receipts_linearized AS processed
+                                    WHERE processed.user_id = eps.user_id
+                                        AND processed.room_id = eps.room_id
+                                        AND (processed.thread_id IS NULL OR processed.thread_id = eps.thread_id)
+                                        AND processed.receipt_type IN ('{ReceiptTypes.READ}', '{ReceiptTypes.READ_PRIVATE}')
+                                        AND processed.stream_id <= (
+                                            SELECT stream_id FROM event_push_summary_last_receipt_stream_id
+                                        )
+                                        AND processed.event_stream_ordering >= r.event_stream_ordering
+                                )
+                        )
+                    )
                     OR last_receipt_stream_ordering = COALESCE(threaded_receipt_stream_ordering, ?)
                 ) AND (notif_count != 0 OR COALESCE(unread_count, 0) != 0)
             """,

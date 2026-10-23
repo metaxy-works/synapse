@@ -276,9 +276,14 @@ class RedisSubscriber(SubscriberProtocol):
 
         channel_name = cmd.redis_channel_name(self.synapse_stream_prefix)
 
-        await make_deferred_yieldable(
-            self.synapse_outbound_redis_connection.publish(channel_name, encoded_string)
-        )
+        # The outbound pool may still be connecting when the subscriber is ready.
+        # txredisapi can yield internally while waiting for a connection, so call
+        # it outside our logging context before wrapping the returned Deferred.
+        with PreserveLoggingContext():
+            deferred = self.synapse_outbound_redis_connection.publish(
+                channel_name, encoded_string
+            )
+        await make_deferred_yieldable(deferred)
 
 
 class SynapseRedisFactory(RedisFactory):

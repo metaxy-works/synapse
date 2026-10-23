@@ -677,17 +677,28 @@ class FederationSender(AbstractFederationSender):
 
                     if destinations is None:
                         try:
-                            # Get the state from before the event.
-                            # We need to make sure that this is the state from before
-                            # the event and not from after it.
-                            # Otherwise if the last member on a server in a room is
-                            # banned then it won't receive the event because it won't
-                            # be in the room after the ban.
+                            if (
+                                is_mine
+                                and event.type == EventTypes.Member
+                                and event.sender == event.state_key
+                            ):
+                                # A local user's own membership only changes our
+                                # server's presence, so remote hosts are the same
+                                # before and after this event. Its OOB invite
+                                # predecessor may not have any state yet.
+                                state_event_ids: StrCollection = [event.event_id]
+                            else:
+                                # Use the previous state for other events: the
+                                # last remote member must still receive a ban
+                                # even though its server is absent afterwards.
+                                state_event_ids = (
+                                    event.prev_state_events
+                                    if supports_msc4242_state_dag(event)
+                                    else event.prev_event_ids()
+                                )
                             destinations = await self.state.get_hosts_in_room_at_events(
                                 event.room_id,
-                                event_ids=event.prev_state_events
-                                if supports_msc4242_state_dag(event)
-                                else event.prev_event_ids(),
+                                event_ids=state_event_ids,
                             )
                         except Exception:
                             logger.exception(

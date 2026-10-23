@@ -21,6 +21,7 @@ import (
 	dockerClient "github.com/docker/docker/client"
 	"github.com/element-hq/synapse/tests/internal/dockerutil"
 	"github.com/matrix-org/complement"
+	"github.com/matrix-org/complement/b"
 	"github.com/matrix-org/complement/client"
 	"github.com/matrix-org/complement/match"
 	"github.com/matrix-org/complement/must"
@@ -51,13 +52,22 @@ oidc_providers:
 // Now instead of failing to start, Synapse will produce a 503 response on the
 // `/_matrix/client/v3/login/sso/redirect/oidc-test_provider` endpoint.
 func TestOIDCProviderUnavailable(t *testing.T) {
-	// Deploy a single homeserver
-	//
-	// FIXME: Since we're modifying the homeserver config, this should be using a clean
-	// deploy that won't affect subsequent tests because Complement will re-use the
-	// deployment, see https://github.com/element-hq/synapse/issues/19937
-	deployment := complement.Deploy(t, 1)
+	// Use a dedicated deployment even in dirty mode: changing configuration and
+	// restarting a shared server can put its federation peers into retry backoff.
+	deployment := complement.OldDeploy(t, b.MustValidate(b.Blueprint{
+		Name: "oidc_provider_unavailable",
+		Homeservers: []b.Homeserver{
+			{Name: "hs1"},
+		},
+	}))
 	defer deployment.Destroy(t)
+
+	// Restarting this server must not interrupt a deployment shared by other tests.
+	if deployment.GetConfig().EnableDirtyRuns {
+		sharedDeployment := complement.Deploy(t, 1)
+		must.NotEqual(t, deployment.ContainerID(t, "hs1"), sharedDeployment.ContainerID(t, "hs1"),
+			"OIDC configuration and restarts must use an isolated homeserver")
+	}
 
 	// Get Docker client to manipulate container
 	dc, err := dockerClient.NewClientWithOpts(
