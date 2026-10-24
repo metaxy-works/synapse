@@ -1703,7 +1703,14 @@ class MediaRepository:
         removed_media = []
         for media_id in media_ids:
             logger.info("Deleting media with ID '%s'", media_id)
-            full_path = self.filepaths.local_media_filepath(media_id)
+            media = await self.store.get_local_media(media_id)
+            is_url_cache = media is not None and media.url_cache is not None
+            if is_url_cache:
+                full_path = self.filepaths.url_cache_filepath(media_id)
+                thumbnail_dir = self.filepaths.url_cache_thumbnail_directory(media_id)
+            else:
+                full_path = self.filepaths.local_media_filepath(media_id)
+                thumbnail_dir = self.filepaths.local_media_thumbnail_dir(media_id)
             try:
                 os.remove(full_path)
             except OSError as e:
@@ -1713,8 +1720,20 @@ class MediaRepository:
                 else:
                     continue
 
-            thumbnail_dir = self.filepaths.local_media_thumbnail_dir(media_id)
-            shutil.rmtree(thumbnail_dir, ignore_errors=True)
+            if is_url_cache:
+                try:
+                    shutil.rmtree(thumbnail_dir)
+                except FileNotFoundError:
+                    pass
+                except OSError as e:
+                    logger.warning(
+                        "Failed to remove URL cache thumbnails: %r: %s",
+                        thumbnail_dir,
+                        e,
+                    )
+                    continue
+            else:
+                shutil.rmtree(thumbnail_dir, ignore_errors=True)
 
             await self.store.delete_remote_media(self.server_name, media_id)
 

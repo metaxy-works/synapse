@@ -1563,6 +1563,138 @@ class URLPreviewTests(unittest.HomeserverTestCase):
             "URL cache thumbnail was unexpectedly retrieved from a storage provider",
         )
 
+    @parameterized.expand([("by_id", False), ("by_age", True)])
+    def test_delete_url_cache_files(self, _name: str, by_age: bool) -> None:
+        """General media deletion removes preview files as well as their metadata."""
+        _host, media_id = self._download_image()
+        paths = self.media_repo.filepaths
+        file_path = paths.url_cache_filepath(media_id)
+        thumbnail_dir = paths.url_cache_thumbnail_directory(media_id)
+        self.assertTrue(os.path.isfile(file_path))
+        self.assertTrue(os.path.isdir(thumbnail_dir))
+        before_ts = self.clock.time_msec() + 1
+
+        # A newer normal upload must be preserved by both deletion entry points.
+        self.reactor.advance(1)
+        normal = self.get_success(
+            self.media_repo.create_or_update_content(
+                "image/png",
+                "keep.png",
+                io.BytesIO(SMALL_PNG),
+                len(SMALL_PNG),
+                UserID.from_string(self.user_id),
+            )
+        )
+        if by_age:
+            deleted, count = self.get_success(
+                self.media_repo.delete_old_local_media(before_ts)
+            )
+        else:
+            # Cached files can outlive the configuration enabling previews.
+            self.media_repo.url_previewer = None
+            deleted, count = self.get_success(
+                self.media_repo.delete_local_media_ids([media_id])
+            )
+        self.assertEqual((deleted, count), ([media_id], 1))
+        self.assertFalse(os.path.exists(file_path))
+        self.assertFalse(os.path.exists(thumbnail_dir))
+        self.assertIsNone(
+            self.get_success(self.url_previewer.store.get_local_media(media_id))
+        )
+        self.assertIsNone(
+            self.get_success(
+                self.url_previewer.store.get_url_cache(
+                    "http://cdn.twitter.com/matrixdotorg", self.clock.time_msec()
+                )
+            )
+        )
+        self.assertEqual(
+            self.get_success(
+                self.url_previewer.store.get_local_media_thumbnails(media_id)
+            ),
+            [],
+        )
+        self.assertTrue(os.path.isfile(paths.local_media_filepath(normal.media_id)))
+        self.assertIsNotNone(
+            self.get_success(self.url_previewer.store.get_local_media(normal.media_id))
+        )
+        self.get_success(self.media_repo.delete_local_media_ids([normal.media_id]))
+        self.assertFalse(os.path.exists(paths.local_media_filepath(normal.media_id)))
+        self.assertFalse(
+            os.path.exists(paths.local_media_thumbnail_dir(normal.media_id))
+        )
+
+    @parameterized.expand([("file", False), ("file_and_thumbnails", True)])
+    def test_delete_url_cache_missing_files(
+        self, _name: str, remove_thumbnails: bool
+    ) -> None:
+        """Missing cached files do not prevent cleaning remaining files and metadata."""
+        _host, media_id = self._download_image()
+        paths = self.media_repo.filepaths
+        os.remove(paths.url_cache_filepath(media_id))
+        thumbnail_dir = paths.url_cache_thumbnail_directory(media_id)
+        if remove_thumbnails:
+            shutil.rmtree(thumbnail_dir)
+        self.assertEqual(
+            self.get_success(self.media_repo.delete_local_media_ids([media_id])),
+            ([media_id], 1),
+        )
+        self.assertFalse(os.path.exists(thumbnail_dir))
+        self.assertIsNone(
+            self.get_success(self.url_previewer.store.get_local_media(media_id))
+        )
+
+    @parameterized.expand([("file", False), ("thumbnails", True)])
+    def test_delete_url_cache_failure_retains_metadata(
+        self, _name: str, thumbnails: bool
+    ) -> None:
+        """A filesystem failure must not turn cached content into an untracked orphan."""
+        _host, media_id = self._download_image()
+        paths = self.media_repo.filepaths
+        target = (
+            paths.url_cache_thumbnail_directory(media_id)
+            if thumbnails
+            else paths.url_cache_filepath(media_id)
+        )
+        original = shutil.rmtree if thumbnails else os.remove
+
+        def fail_target(path: str) -> None:
+            if path == target:
+                raise PermissionError("Fixture deletion denied")
+            original(path)
+
+        with patch(
+            "synapse.media.media_repository.shutil.rmtree"
+            if thumbnails
+            else "synapse.media.media_repository.os.remove",
+            side_effect=fail_target,
+        ):
+            self.assertEqual(
+                self.get_success(self.media_repo.delete_local_media_ids([media_id])),
+                ([], 0),
+            )
+        self.assertTrue(os.path.exists(target))
+        self.assertIsNotNone(
+            self.get_success(self.url_previewer.store.get_local_media(media_id))
+        )
+        self.assertIsNotNone(
+            self.get_success(
+                self.url_previewer.store.get_url_cache(
+                    "http://cdn.twitter.com/matrixdotorg", self.clock.time_msec()
+                )
+            )
+        )
+        # A later retry can complete, including when the original was already removed.
+        self.assertEqual(
+            self.get_success(self.media_repo.delete_local_media_ids([media_id])),
+            ([media_id], 1),
+        )
+        self.assertFalse(os.path.exists(paths.url_cache_filepath(media_id)))
+        self.assertFalse(os.path.exists(paths.url_cache_thumbnail_directory(media_id)))
+        self.assertIsNone(
+            self.get_success(self.url_previewer.store.get_local_media(media_id))
+        )
+
     def test_cache_expiry(self) -> None:
         """Test that URL cache files and thumbnails are cleaned up properly on expiry."""
         _host, media_id = self._download_image()
