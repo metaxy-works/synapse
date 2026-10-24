@@ -220,8 +220,9 @@ class WorkflowTests(unittest.TestCase):
         )
 
     def test_release_guards_are_preserved(self):
-        for job in workflow("docker.yml")["jobs"].values():
-            self.assertIn("github.repository == 'element-hq/synapse'", job["if"])
+        for filename in ("docker.yml", "push_complement_image.yml"):
+            for job in workflow(filename)["jobs"].values():
+                self.assertIn("github.repository == 'element-hq/synapse'", job["if"])
         self.assertEqual(
             set(self.tests["on"]),
             {"pull_request", "push", "merge_group", "workflow_dispatch"},
