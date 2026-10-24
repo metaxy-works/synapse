@@ -46,7 +46,7 @@ from twisted.web.http_headers import Headers
 from twisted.web.iweb import UNKNOWN_LENGTH, IResponse
 from twisted.web.resource import Resource
 
-from synapse.api.errors import HttpResponseException
+from synapse.api.errors import Codes, HttpResponseException
 from synapse.api.ratelimiting import Ratelimiter
 from synapse.config._base import Config
 from synapse.config.oembed import OEmbedEndpointConfig
@@ -293,6 +293,53 @@ class URLPreviewTests(unittest.HomeserverTestCase):
                 return resolutionReceiver
 
         self.reactor.nameResolver = Resolver()  # type: ignore[assignment]
+
+    @parameterized.expand(
+        [
+            ("word", "ontvangen:"),
+            ("mailto", "mailto:someone@example.com"),
+            ("tel", "tel:+3112345678"),
+            ("file", "file:///tmp/preview-test"),
+            ("ftp", "ftp://matrix.org/file"),
+            ("data", "data:text/plain,hello"),
+            ("relative", "/relative"),
+            ("scheme_relative", "//matrix.org/path"),
+            ("no_host", "https://"),
+            ("invalid_ipv6", "http://[invalid]/"),
+        ]
+    )
+    def test_invalid_url_rejected_before_fetch(self, _name: str, url: str) -> None:
+        """Invalid preview input is a client error, not a failed HTTP fetch."""
+        channel = self.make_request(
+            "GET",
+            "/_matrix/client/v1/media/preview_url?url=" + quote(url, safe=""),
+            shorthand=False,
+        )
+        self.assertEqual(channel.code, 400, channel.json_body)
+        self.assertEqual(channel.json_body["errcode"], Codes.INVALID_PARAM)
+        self.assertEqual(self.reactor.tcpClients, [])
+        self.assertNotIn(url, self.url_previewer._cache)
+
+    @parameterized.expand(
+        [
+            "http://matrix.org/",
+            "https://matrix.org/",
+            "HTTP://matrix.org/",
+            "HTTPS://matrix.org/",
+        ]
+    )
+    def test_http_schemes_reach_preview(self, url: str) -> None:
+        """HTTP(S) input, including uppercase schemes, reaches preview generation."""
+        with patch.object(
+            self.url_previewer, "_do_preview", new=AsyncMock(return_value=b"{}")
+        ) as preview:
+            self.assertEqual(
+                self.get_success(
+                    self.url_previewer.preview(url, UserID.from_string(self.user_id), 0)
+                ),
+                b"{}",
+            )
+            preview.assert_awaited_once_with(url, UserID.from_string(self.user_id), 0)
 
     def _assert_small_png(self, json_body: JsonDict) -> None:
         """Assert properties from the SMALL_PNG test image."""
@@ -998,7 +1045,7 @@ class URLPreviewTests(unittest.HomeserverTestCase):
 
     def test_data_url(self) -> None:
         """
-        Requesting to preview a data URL is not supported.
+        HTML is not an absolute HTTP(S) URL and must be rejected.
         """
         self.lookups["matrix.org"] = [(IPv4Address, "10.1.2.3")]
 
@@ -1017,7 +1064,8 @@ class URLPreviewTests(unittest.HomeserverTestCase):
         )
         self.pump()
 
-        self.assertEqual(channel.code, 500)
+        self.assertEqual(channel.code, 400)
+        self.assertEqual(channel.json_body["errcode"], Codes.INVALID_PARAM)
 
     def test_inline_data_url(self) -> None:
         """
