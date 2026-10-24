@@ -242,6 +242,21 @@ class UrlPreviewer:
             )
 
     async def preview(self, url: str, user: UserID, ts: int) -> bytes:
+        # Reject unsupported input before consulting caches or starting a download.
+        try:
+            parsed_url = urlsplit(url)
+            valid_url = parsed_url.scheme in ("http", "https") and bool(
+                parsed_url.hostname
+            )
+        except ValueError:
+            valid_url = False
+        if not valid_url:
+            raise SynapseError(
+                400,
+                "URL must be an absolute HTTP or HTTPS URL",
+                Codes.INVALID_PARAM,
+            )
+
         # the in-memory cache:
         # * ensures that only one request to a URL is active at a time
         # * takes load off the DB for the thundering herds

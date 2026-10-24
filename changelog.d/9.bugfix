@@ -1,0 +1,1 @@
+Reject non-HTTP(S) and hostless URL preview inputs with a clear client error instead of an internal server error.
